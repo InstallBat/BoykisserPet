@@ -95,6 +95,16 @@ public sealed class SettingsForm : Form
         AddCombo(flow, "Chatter frequency", PetSettings.SpeedPresetLabels, _settings.ChatterPreset,
             v => _settings.ChatterPreset = v);
 
+        AddSectionHeader(flow, "Windows integrations");
+        AddCheck(flow, "React to Telegram/AyuGram/browser notifications",
+            _settings.NotificationReactionEnabled, v => _settings.NotificationReactionEnabled = v);
+        AddCheck(flow, "Get startled by loud app audio (35% peak; 15–20 min cooldown)",
+            _settings.LoudSoundReactionEnabled, v => _settings.LoudSoundReactionEnabled = v);
+        AddCheck(flow, "Dance while music is playing (LRCLIB title match)",
+            _settings.MusicDanceEnabled, v => _settings.MusicDanceEnabled = v);
+        AddCheck(flow, "Always dance when music is detected (100% instead of 80%)",
+            _settings.MusicDanceAlways, v => _settings.MusicDanceAlways = v);
+
         AddSectionHeader(flow, "Sleep");
         AddCheck(flow, "Fall asleep when idle", _settings.SleepEnabled, v => _settings.SleepEnabled = v);
         AddCombo(flow, "Sleep after", PetSettings.SpeedPresetLabels, _settings.SleepTimeoutPreset,
@@ -148,6 +158,17 @@ public sealed class SettingsForm : Form
 
             AddSectionHeader(_petList, $"Pet {i + 1}");
 
+            var nameRow = new FlowLayoutPanel { Width = 410, Height = 34, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            nameRow.Controls.Add(new Label { Text = "Name", Width = 110, TextAlign = ContentAlignment.MiddleLeft });
+            var nameBox = new TextBox { Text = config.Name, Width = 285, MaxLength = 40 };
+            nameBox.TextChanged += (_, _) =>
+            {
+                _settings.Pets[index].Name = nameBox.Text.Trim();
+                Notify();
+            };
+            nameRow.Controls.Add(nameBox);
+            _petList.Controls.Add(nameRow);
+
             var sizeRow = new FlowLayoutPanel { Width = 410, Height = 34, FlowDirection = FlowDirection.LeftToRight };
             sizeRow.Controls.Add(new Label { Text = "Size (px)", Width = 110, TextAlign = ContentAlignment.MiddleLeft });
             var sizeValue = new Label { Text = config.Size.ToString(), Width = 42, TextAlign = ContentAlignment.MiddleRight };
@@ -192,6 +213,7 @@ public sealed class SettingsForm : Form
             alphaRow.Controls.Add(alphaValue);
             _petList.Controls.Add(alphaRow);
 
+            _petRows.Add(nameRow);
             _petRows.Add(sizeRow);
             _petRows.Add(alphaRow);
         }

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Reflection;
+using Microsoft.Win32;
 
 namespace BoykisserPet;
 
@@ -17,12 +18,16 @@ public sealed class PetAppContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _timer;
     private readonly NotifyIcon _tray;
     private HotkeyWindow? _hotkeys;
+    private readonly SystemReactions _systemReactions;
 
     private double _lastTickMs;
     private bool _fullscreenActive;
     private double _lastFullscreenCheckMs = -10000;
     private int _nextPetIndex;
     private bool _shuttingDown;
+    private double _lastSystemCheckMs = -15_000;
+    private double _lastLowBatteryAlertMs = -1_000_000;
+    private DateOnly? _lastNightAlertDate;
 
     private sealed class PetRuntime
     {
@@ -36,6 +41,33 @@ public sealed class PetAppContext : ApplicationContext
     public PetAppContext()
     {
         _settings = PetSettings.Load();
+        _systemReactions = new SystemReactions();
+
+        if (!_settings.FirstRunCompleted)
+        {
+            using var setup = new FirstRunForm(_settings.Pets.FirstOrDefault()?.Name ?? string.Empty, _settings.LaunchAtStartup);
+            if (setup.ShowDialog() == DialogResult.OK)
+            {
+                if (_settings.Pets.Count == 0) _settings.Pets.Add(new PetConfig());
+                _settings.Pets[0].Name = setup.PetName;
+                _settings.LaunchAtStartup = setup.LaunchAtStartup;
+                _settings.FirstRunCompleted = true;
+                StartupRegistration.SetEnabled(_settings.LaunchAtStartup);
+                _settings.Save();
+            }
+            else
+            {
+                // Closing the dialog still completes setup with a usable default name,
+                // so the welcome screen will not trap the user on every launch.
+                if (_settings.Pets.Count == 0) _settings.Pets.Add(new PetConfig());
+                if (string.IsNullOrWhiteSpace(_settings.Pets[0].Name)) _settings.Pets[0].Name = "Бойкиссер";
+                _settings.FirstRunCompleted = true;
+                _settings.Save();
+            }
+        }
+
+        // Keep Windows startup registration in sync with the persisted setting.
+        StartupRegistration.SetEnabled(_settings.LaunchAtStartup);
 
         foreach (PetConfig config in _settings.Pets)
             SpawnPet(config);
@@ -87,9 +119,8 @@ public sealed class PetAppContext : ApplicationContext
             if (e.Button != MouseButtons.Left) return;
             Point screen = Cursor.Position;
             runtime.PressActive = true;
-            runtime.PressOrigin = screen;
-            window.SetClickThrough(false);
             window.Capture = true;
+            runtime.PressOrigin = screen;
             runtime.PressZone = pet.IsTopZone(screen);
 
             pet.BeginPress(NowMs);
@@ -98,8 +129,15 @@ public sealed class PetAppContext : ApplicationContext
             if (!runtime.PressZone) pet.OnGrabbed(NowMs);
         };
 
-        // Pointer movement is polled from the main timer so dragging continues
-        // even after the cursor leaves the transparent overlay window.
+        window.MouseMove += (_, _) =>
+        {
+            if (!runtime.PressActive) return;
+            Point screen = Cursor.Position;
+            float dx = screen.X - runtime.PressOrigin.X;
+            float dy = screen.Y - runtime.PressOrigin.Y;
+            pet.NoteDragDistance(MathF.Sqrt(dx * dx + dy * dy));
+            pet.OnPointerMove(screen, NowMs);
+        };
 
         window.MouseUp += (_, e) =>
         {
@@ -119,7 +157,7 @@ public sealed class PetAppContext : ApplicationContext
 
         window.MouseWheel += (_, e) => CycleSize(pet, e.Delta);
 
-        window.MouseClick += (_, e) =>
+        window.MouseUp += (_, e) =>
         {
             if (e.Button == MouseButtons.Right)
                 ShowPetMenu(runtime, Cursor.Position);
@@ -148,46 +186,114 @@ public sealed class PetAppContext : ApplicationContext
             _fullscreenActive = Native.FullscreenAppActive();
         }
 
+        if (now - _lastSystemCheckMs >= 15_000)
+        {
+            _lastSystemCheckMs = now;
+            CheckWindowsSystemState(now);
+        }
+
+        HandleSystemReactions(now);
+
         foreach (PetRuntime runtime in _pets)
         {
             Pet pet = runtime.Pet;
-
-            // Layered windows can stop receiving mouse events once the cursor
-            // leaves their bounds. Poll the global pointer/button state while
-            // a drag is active, and synthesize the matching move/release.
-            if (runtime.PressActive)
-            {
-                Point screen = Cursor.Position;
-                float dx = screen.X - runtime.PressOrigin.X;
-                float dy = screen.Y - runtime.PressOrigin.Y;
-                pet.NoteDragDistance(MathF.Sqrt(dx * dx + dy * dy));
-                if ((Control.MouseButtons & MouseButtons.Left) != 0)
-                    pet.OnPointerMove(screen, now);
-                else
-                {
-                    runtime.PressActive = false;
-                    runtime.Window.Capture = false;
-                    pet.OnPointerUp(screen, now);
-                }
-            }
-
             bool moved = pet.Update(now, dt, _fullscreenActive);
 
             bool overPet = CursorOverPet(runtime, Cursor.Position);
             bool busy = overPet || runtime.PressActive || pet.IsBeingDragged || pet.NeedsAnimationFrame;
 
+            // Update input routing every tick, even when no repaint is needed.
+            // Otherwise the transparent overlay can remain click-through (or
+            // intercept the desktop) after the cursor moves.
+            runtime.Window.SetClickThrough(!(overPet || runtime.PressActive || pet.IsBeingDragged));
             bool needsPaint = moved || pet.IsDirty || busy;
             if (!needsPaint) continue;
-
-            // Click-through is only disabled while the cursor is actually over
-            // the pet, so the rest of the screen stays fully usable.
-            runtime.Window.SetClickThrough(!(overPet || runtime.PressActive || pet.IsBeingDragged));
 
             using (Graphics g = Graphics.FromImage(runtime.Window.Buffer))
                 pet.Draw(g, now);
 
             runtime.Window.Present(runtime.Window.Buffer, (int)pet.X, (int)pet.Y);
             pet.MarkClean();
+        }
+    }
+
+    private void HandleSystemReactions(double now)
+    {
+        // Toasts are detected by a global WinEvent hook and matched against UI Automation text.
+        if (_settings.NotificationReactionEnabled)
+        {
+            int handled = 0;
+            while (handled++ < 8 && _systemReactions.TryDequeueNotification(out Rectangle toastBounds))
+            {
+                foreach (PetRuntime runtime in _pets)
+                {
+                    var petBounds = new Rectangle(
+                        (int)runtime.Pet.X + (runtime.Pet.WindowW - runtime.Pet.SpriteW) / 2,
+                        (int)runtime.Pet.Y + runtime.Pet.WindowH - runtime.Pet.SpriteH - 45,
+                        runtime.Pet.SpriteW, runtime.Pet.SpriteH + 30);
+                    if (petBounds.IntersectsWith(toastBounds))
+                        runtime.Pet.OnRoll(now);
+                }
+            }
+        }
+        else
+        {
+            while (_systemReactions.TryDequeueNotification(out _)) { }
+        }
+
+        SystemReactions.SoundEvent? evt = _systemReactions.PollSoundAndMusic(
+            _settings.LoudSoundReactionEnabled, _settings.MusicDanceEnabled, _settings.MusicDanceAlways);
+        if (evt is null) return;
+
+        if (evt.Value.ProcessId == 0 && evt.Value.ProcessName == "music")
+        {
+            if (_pets.Count > 0) _pets[0].Pet.SetMusicDance(true, now);
+            return;
+        }
+        if (evt.Value.ProcessId == 0 && evt.Value.ProcessName == "music-stopped")
+        {
+            foreach (PetRuntime runtime in _pets) runtime.Pet.SetMusicDance(false, now);
+            return;
+        }
+
+        // Sudden loud sound startles a pet only if it was asleep; cooldown/re-arm is per process.
+        foreach (PetRuntime runtime in _pets)
+        {
+            if (runtime.Pet.IsSleeping)
+            {
+                runtime.Pet.OnScared(now, evt.Value.ProcessName);
+                break;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    // Windows system integration (Win32 power status + local time)
+    // ------------------------------------------------------------------ //
+
+    private void CheckWindowsSystemState(double now)
+    {
+        if (_pets.Count == 0) return;
+        Pet pet = _pets[0].Pet;
+        DateTime localNow = DateTime.Now;
+
+        // Warn once per 20 minutes while unplugged and at/below 20%.
+        if (Native.TryGetPowerStatus(out Native.SYSTEM_POWER_STATUS power)
+            && power.ACLineStatus == 0
+            && power.BatteryLifePercent <= 20
+            && power.BatteryLifePercent != 255
+            && now - _lastLowBatteryAlertMs >= 20 * 60_000)
+        {
+            _lastLowBatteryAlertMs = now;
+            pet.Say(now, $"Батарея почти села — осталось {power.BatteryLifePercent}%. Подключи зарядку.");
+        }
+
+        // One gentle reminder per local date during the 03:00 hour.
+        var today = DateOnly.FromDateTime(localNow);
+        if (localNow.Hour == 3 && _lastNightAlertDate != today)
+        {
+            _lastNightAlertDate = today;
+            pet.Say(now, "Уже три ночи. Может, пора спать? :3");
         }
     }
 
@@ -304,17 +410,21 @@ public sealed class PetAppContext : ApplicationContext
     {
         var menu = new ContextMenuStrip();
 
-        var header = new ToolStripMenuItem($"Boykisser {runtime.Pet.Index + 1}") { Enabled = false };
+        string petName = string.IsNullOrWhiteSpace(runtime.Pet.Config.Name)
+            ? $"Бойкиссер {runtime.Pet.Index + 1}"
+            : runtime.Pet.Config.Name;
+        var header = new ToolStripMenuItem(petName) { Enabled = false };
         menu.Items.Add(header);
         menu.Items.Add(new ToolStripSeparator());
 
-        menu.Items.Add("Talk", null, (_, _) => runtime.Pet.OnTalk(NowMs));
-        menu.Items.Add("Pet", null, (_, _) => runtime.Pet.OnPet(NowMs));
-        menu.Items.Add("Dance", null, (_, _) => runtime.Pet.OnDance(NowMs));
-        menu.Items.Add("Roll!", null, (_, _) => runtime.Pet.OnRoll(NowMs));
-        menu.Items.Add("Wake up", null, (_, _) => runtime.Pet.OnTalk(NowMs));
+        menu.Items.Add("Поговорить", null, (_, _) => runtime.Pet.OnTalk(NowMs));
+        menu.Items.Add("Погладить", null, (_, _) => runtime.Pet.OnPet(NowMs));
+        menu.Items.Add("Покормить", null, (_, _) => runtime.Pet.OnFeed(NowMs));
+        menu.Items.Add("Танцевать (7 секунд)", null, (_, _) => runtime.Pet.StartDance(NowMs));
+        menu.Items.Add("Кувыркнуться", null, (_, _) => runtime.Pet.OnRoll(NowMs));
+        menu.Items.Add("Разбудить", null, (_, _) => runtime.Pet.WakeFromMenu(NowMs));
 
-        var sizeMenu = new ToolStripMenuItem("Size");
+        var sizeMenu = new ToolStripMenuItem("Размер");
         foreach (int size in new[] { 80, 110, 140, 180, 240, 320 })
         {
             int captured = size;
@@ -331,15 +441,15 @@ public sealed class PetAppContext : ApplicationContext
         menu.Items.Add(sizeMenu);
 
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("Settings…", null, (_, _) => ShowSettings()));
-        menu.Items.Add(new ToolStripMenuItem("Add another pet", null, (_, _) => AddPet()));
+        menu.Items.Add(new ToolStripMenuItem("Настройки…", null, (_, _) => ShowSettings()));
+        menu.Items.Add(new ToolStripMenuItem("Добавить питомца", null, (_, _) => AddPet()));
         if (_pets.Count > 1)
-            menu.Items.Add(new ToolStripMenuItem("Remove this pet", null, (_, _) => RemovePet()));
+            menu.Items.Add(new ToolStripMenuItem("Убрать этого питомца", null, (_, _) => RemovePet()));
 
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem(_settings.Enabled ? "Pause (hide pets)" : "Resume", null, (_, _) => TogglePause()));
+        menu.Items.Add(new ToolStripMenuItem(_settings.Enabled ? "Пауза (скрыть питомцев)" : "Продолжить", null, (_, _) => TogglePause()));
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => Shutdown()));
+        menu.Items.Add(new ToolStripMenuItem("Выход", null, (_, _) => Shutdown()));
 
         menu.Show(screen);
     }
@@ -347,15 +457,15 @@ public sealed class PetAppContext : ApplicationContext
     private NotifyIcon BuildTrayIcon()
     {
         var menu = new ContextMenuStrip();
-        menu.Items.Add("Talk to them", null, (_, _) => TalkToAll());
-        menu.Items.Add("Roll!", null, (_, _) => RollAll());
+        menu.Items.Add("Поговорить со всеми", null, (_, _) => TalkToAll());
+        menu.Items.Add("Кувыркнуться всем", null, (_, _) => RollAll());
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Add another pet", null, (_, _) => AddPet());
-        menu.Items.Add("Remove a pet", null, (_, _) => RemovePet());
+        menu.Items.Add("Добавить питомца", null, (_, _) => AddPet());
+        menu.Items.Add("Убрать питомца", null, (_, _) => RemovePet());
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Settings…", null, (_, _) => ShowSettings());
+        menu.Items.Add("Настройки…", null, (_, _) => ShowSettings());
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Exit", null, (_, _) => Shutdown());
+        menu.Items.Add("Выход", null, (_, _) => Shutdown());
 
         var icon = new NotifyIcon
         {
@@ -433,6 +543,8 @@ public sealed class PetAppContext : ApplicationContext
         _settingsForm = new SettingsForm(_settings, pets =>
         {
             foreach (PetRuntime r in _pets) r.Pet.ApplySettings();
+            StartupRegistration.SetEnabled(_settings.LaunchAtStartup);
+            _settings.Save();
             _fullscreenCheck();
         });
         _settingsForm.FormClosed += (_, _) => _settingsForm = null;
@@ -452,6 +564,7 @@ public sealed class PetAppContext : ApplicationContext
         _shuttingDown = true;
 
         _timer.Stop();
+        _systemReactions.Dispose();
         _tray.Visible = false;
         _tray.Dispose();
         _hotkeys?.Dispose();

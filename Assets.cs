@@ -15,6 +15,7 @@ public static class Assets
     public const string SleepGif = "sleep.gif";
     public const string MeowMp3 = "meow.mp3";
     public const string PurrMp3 = "purr.mp3";
+    public const string FeedMp3 = "nom-nom-nom.mp3";
 
     public static readonly string[] IdleGifs =
     {

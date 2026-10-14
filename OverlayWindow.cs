@@ -36,6 +36,9 @@ public sealed class OverlayWindow : Form
         TransparencyKey = Color.Empty;
         // Never take focus from the app the user is actually working in.
         SetStyle(ControlStyles.Selectable, false);
+        // Must remain enabled to receive mouse input; ShowWithoutActivation and
+        // WS_EX_NOACTIVATE prevent it from stealing keyboard focus.
+        Enabled = true;
 
         _buffer = new Bitmap(width, height, PixelFormat.Format32bppPArgb);
 

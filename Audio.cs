@@ -67,10 +67,13 @@ public sealed class PetAudio : IDisposable
 {
     private readonly string? _meowPath;
     private readonly string? _purrPath;
+    private readonly string? _feedPath;
     private string _meowAlias = string.Empty;
     private string _purrAlias = string.Empty;
+    private string _feedAlias = string.Empty;
     private bool _meowOpen;
     private bool _purrOpen;
+    private bool _feedOpen;
     private bool _purrPlaying;
     private int _meowDurationMs;
 
@@ -78,10 +81,11 @@ public sealed class PetAudio : IDisposable
     /// doesn't yowl over someone's game.</summary>
     public bool Muted { get; set; }
 
-    public PetAudio(string? meowPath, string? purrPath)
+    public PetAudio(string? meowPath, string? purrPath, string? feedPath = null)
     {
         _meowPath = meowPath;
         _purrPath = purrPath;
+        _feedPath = feedPath;
     }
 
     private void EnsureMeowOpen()
@@ -150,6 +154,25 @@ public sealed class PetAudio : IDisposable
         Mci.Send($"seek {_meowAlias} to start");
     }
 
+    private void EnsureFeedOpen()
+    {
+        if (_feedOpen || _feedPath is null) return;
+        _feedAlias = Mci.NextAlias("bkfeed");
+        _feedOpen = Mci.Open(_feedPath, _feedAlias);
+    }
+
+    /// <summary>Plays the feeding sound from the beginning.</summary>
+    public void PlayFeed()
+    {
+        if (Muted) return;
+        EnsureFeedOpen();
+        if (!_feedOpen) return;
+        Mci.Send($"stop {_feedAlias}");
+        Mci.Send($"seek {_feedAlias} to start");
+        Mci.Send($"setaudio {_feedAlias} volume to 1000");
+        Mci.Send($"play {_feedAlias}");
+    }
+
     /// <summary>Starts the purr loop. Idempotent while already purring, so a
     /// continuous petting stroke never restarts the sound.</summary>
     public void StartPurr()
@@ -175,8 +198,9 @@ public sealed class PetAudio : IDisposable
         {
             if (_meowOpen) { Mci.Send($"stop {_meowAlias}"); Mci.Close(_meowAlias); }
             if (_purrOpen) { Mci.Send($"stop {_purrAlias}"); Mci.Close(_purrAlias); }
+            if (_feedOpen) { Mci.Send($"stop {_feedAlias}"); Mci.Close(_feedAlias); }
         }
         catch { /* shutting down; nothing useful to do */ }
-        _meowOpen = _purrOpen = _purrPlaying = false;
+        _meowOpen = _purrOpen = _feedOpen = _purrPlaying = false;
     }
 }

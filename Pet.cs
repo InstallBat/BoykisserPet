@@ -20,7 +20,8 @@ public sealed class Pet : IDisposable
 {
     // ---- animation durations, ported from the plugin ----
     private const int AnimDurationMs = 1250;
-    private const int IdleGifDurationMs = 3000;
+    private const int IdleGifDurationMs = 7000;
+    private const float DragStartThreshold = 13f;
     private const int BulletinDelayMs = 650;
     private const int MinMeowHalfMs = 200;
 
@@ -121,9 +122,10 @@ public sealed class Pet : IDisposable
     private double _nextIdleMeowMs;
     private double _nextChatterMs;
     private double _nextWanderMs;
+    private double _nextStumbleMs;
     private double _lastInteractionMs;
 
-    private float _wanderTargetX;
+    private float _wanderTargetX, _wanderTargetY;
     private int _facing = 1; // 1 = right, -1 = left
 
     private readonly ParticleSystem _particles = new();
@@ -140,7 +142,7 @@ public sealed class Pet : IDisposable
         _workArea = workArea;
         _nowMs = nowMs;
 
-        _audio = new PetAudio(Assets.SoundPath(Assets.MeowMp3), Assets.SoundPath(Assets.PurrMp3));
+        _audio = new PetAudio(Assets.SoundPath(Assets.MeowMp3), Assets.SoundPath(Assets.PurrMp3), Assets.SoundPath(Assets.FeedMp3));
 
         LoadSprites();
 
@@ -278,6 +280,8 @@ public sealed class Pet : IDisposable
     {
         _nowMs = nowMs;
         _dirty = true;
+        // Keep the pointer capture, but do not move the pet until the cursor
+        // has crossed the drag threshold. A short click remains a click.
         IsBeingDragged = true;
         _pressStartMs = nowMs;
         _pressX = screenPoint.X;
@@ -307,15 +311,23 @@ public sealed class Pet : IDisposable
         _nowMs = nowMs;
         _dirty = true;
 
-        // Petting lives in the upper half of the sprite and ignores dragging.
+        float totalDx = screenPoint.X - _pressX;
+        float totalDy = screenPoint.Y - _pressY;
+        float totalDistance = MathF.Sqrt(totalDx * totalDx + totalDy * totalDy);
+
+        // Petting lives in the upper half of the sprite. It can trigger with
+        // back-and-forth strokes; otherwise only movement beyond the threshold
+        // becomes a drag, so a short click never nudges the window.
         if (_pressIsTopZone && _settings.PettingEnabled)
         {
             HandlePettingGesture(screenPoint, nowMs);
-            // A deliberate back-and-forth stroke pets; otherwise dragging works anywhere.
             if (_petTriggered) return;
         }
 
-        if (_settings.DraggingEnabled)
+        if (totalDistance >= DragStartThreshold && _settings.DraggingEnabled)
+            _draggedFar = true;
+
+        if (_draggedFar && _settings.DraggingEnabled)
         {
             X = (float)(screenPoint.X - _dragGrabDX);
             Y = (float)(screenPoint.Y - _dragGrabDY);
@@ -391,7 +403,7 @@ public sealed class Pet : IDisposable
 
     public void NoteDragDistance(float distance)
     {
-        if (distance > 10f) _draggedFar = true;
+        if (distance >= DragStartThreshold) _draggedFar = true;
     }
 
     public void BeginPress(double nowMs)
@@ -433,56 +445,89 @@ public sealed class Pet : IDisposable
 
     public void OnTap(double nowMs)
     {
-        // A simple click always returns the pet to its initial/idle sprite,
-        // cancelling petting, dance and any looping reaction.
         _nowMs = nowMs;
-        _lastInteractionMs = nowMs;
         _dirty = true;
-        _animating = false;
-        _baseAnimating = false;
-        _baseClockMs = 0;
-        _petMainActive = false;
-        _petMainClockMs = 0;
-        IsPetting = false;
-        _idleActive = false;
-        _idleGif = null;
-        _idleClockMs = 0;
-        _sleeping = false;
-        _airborne = false;
-        _vx = _vy = 0;
-        _spin = _spinVel = 0;
-        StopPurr();
-        InterruptIdleGif();
-        _activity = PetActivity.Standing;
+        bool wasAnimating = _animating || _baseAnimating || _idleActive || _petMainActive || IsPetting;
+        StopTransientAnimations();
+        if (_sleeping) WakeUp(nowMs);
+        if (wasAnimating) return; // short click cancels the current animation
+
+        if (!_settings.TapEnabled)
+        {
+            // Still a reaction, just a silent/physical one.
+            return;
+        }
+
+        if (_animating) return;
+        _animating = true;
+
+        string line = Phrases.TapDeck.Next(_bubble.Text);
+        Say(nowMs, line);
+        Hop(nowMs, reaction: true);
+
+        int meowMs = _settings.SoundsEnabled ? _audio.PlayMeow() : 0;
+        PlayBaseAnimation(nowMs);
+
+        double busyMs = Math.Max(AnimDurationMs, meowMs);
+        _busyUntilMs = nowMs + busyMs;
     }
 
-    public void OnDance(double nowMs)
+    private double _busyUntilMs;
+
+    /// <summary>Starts a seven-second dance/random sprite animation.</summary>
+    public void StartDance(double nowMs)
     {
         _nowMs = nowMs;
-        _lastInteractionMs = nowMs;
-        _dirty = true;
-        StopPurr();
-        IsPetting = false;
-        _petMainActive = false;
-        _animating = false;
-        _baseAnimating = false;
-        _sleeping = false;
-        _airborne = false;
-        _vx = _vy = 0;
-        _activity = PetActivity.Standing;
-
+        if (_sleeping) WakeUp(nowMs);
+        StopTransientAnimations();
         AnimatedGif? gif = PickIdleGif();
         if (gif is null) return;
         _idleGif = gif;
         _idleActive = true;
         _idleClockMs = 0;
-        _idleEndsMs = nowMs + IdleGifDurationMs;
-        // Delay the next autonomous dance so a manual dance isn't followed
-        // immediately by another one.
-        _nextIdleGifMs = nowMs + Random.Shared.Next(150_000, 240_001);
+        _idleEndsMs = nowMs + 7000;
+        _musicDanceMode = false;
+        _dancePoseActive = true;
+        _lastInteractionMs = nowMs;
+        Say(nowMs, Phrases.IdleDeck.Next(_bubble.Text));
+        _dirty = true;
     }
 
-    private double _busyUntilMs;
+    /// <summary>Keep the dance animation active for as long as music is detected.</summary>
+    public void SetMusicDance(bool active, double nowMs)
+    {
+        if (active)
+        {
+            if (!_musicDanceMode || !_idleActive) StartDance(nowMs);
+            _musicDanceMode = true;
+            _idleEndsMs = double.MaxValue;
+            _dirty = true;
+        }
+        else if (_musicDanceMode)
+        {
+            _musicDanceMode = false;
+            _dancePoseActive = false;
+            _idleEndsMs = nowMs;
+            _dirty = true;
+        }
+    }
+
+    /// <summary>Return to the idle sprite and stop ongoing petting/dance/audio.</summary>
+    private void StopTransientAnimations()
+    {
+        _musicDanceMode = false;
+        _dancePoseActive = false;
+        InterruptIdleGif();
+        _animating = false;
+        _busyUntilMs = 0;
+        _baseAnimating = false;
+        _baseClockMs = 0;
+        _petMainActive = false;
+        _petMainClockMs = 0;
+        IsPetting = false;
+        StopPurr();
+        _dirty = true;
+    }
 
     public void OnPet(double nowMs)
     {
@@ -500,6 +545,19 @@ public sealed class Pet : IDisposable
         }
 
         Hop(nowMs, reaction: false);
+    }
+
+    /// <summary>Feed the pet: show a speech line and play the nom-nom sound.</summary>
+    public void OnFeed(double nowMs)
+    {
+        _nowMs = nowMs;
+        if (_sleeping) WakeUp(nowMs);
+        StopTransientAnimations();
+        Say(nowMs, "Ням-ням-ням! Спасибо за вкусняшку!");
+        if (_settings.SoundsEnabled) _audio.PlayFeed();
+        Hop(nowMs, reaction: true);
+        _lastInteractionMs = nowMs;
+        _dirty = true;
     }
 
     public void OnTalk(double nowMs)
@@ -528,6 +586,49 @@ public sealed class Pet : IDisposable
         _airborne = true;
         _spinVel = _vx / _rollR;
         _dirty = true;
+    }
+
+    public void OnStumble(double nowMs)
+    {
+        _nowMs = nowMs;
+        if (_sleeping) WakeUp(nowMs);
+        StopTransientAnimations();
+        Say(nowMs, new[] { "ОЙ!! ААА, ПАДАЮ!!", "Мяу!! Я оступился!!", "АААА— *кувырок*", "Кто убрал пол?! МЯУ!!" }[Random.Shared.Next(4)]);
+        if (_settings.SoundsEnabled) _audio.PlayMeow(0.9f);
+        CancelWander();
+        float dir = Random.Shared.Next(2) == 0 ? -1f : 1f;
+        _vx = dir * Random.Shared.Next(350, 700);
+        _vy = -Random.Shared.Next(100, 280);
+        _airborne = true;
+        _spinVel = dir * Random.Shared.Next(5, 10);
+        _lastInteractionMs = nowMs;
+        _nextStumbleMs = nowMs + Random.Shared.Next(45_000, 100_001);
+        _dirty = true;
+    }
+
+    public void OnScared(double nowMs, string sourceName)
+    {
+        _nowMs = nowMs;
+        _dirty = true;
+        if (_sleeping) WakeUp(nowMs);
+        StopTransientAnimations();
+        string[] scaredLines =
+        {
+            "ААА! ЧТО ЭТО БЫЛО?!",
+            "АЙ! Я чуть не подпрыгнул до потолка!",
+            "Тише-тише! Я тут вообще-то спал!",
+            "Мя?! Это ты так громко?!",
+            "Фух... показалось, что-то взорвалось :c"
+        };
+        Say(nowMs, scaredLines[Random.Shared.Next(scaredLines.Length)]);
+        if (_settings.SoundsEnabled) _audio.PlayMeow(0.75f);
+        CancelWander();
+        float dir = X - _workArea.Left > _workArea.Right - X ? -1f : 1f;
+        _vx = dir * 1150f;
+        _vy = -650f;
+        _airborne = true;
+        _spinVel = _vx / _rollR;
+        _lastInteractionMs = nowMs;
     }
 
     /// <summary>Startles the pet when it is picked up.</summary>
@@ -597,10 +698,7 @@ public sealed class Pet : IDisposable
 
     private void ScheduleAll(double nowMs)
     {
-        var (gifMin, gifMax) = _settings.IdleGifIntervalMs();
-        gifMin = Math.Max(gifMin, 150_000);
-        gifMax = Math.Max(gifMax, 240_000);
-        _nextIdleGifMs = nowMs + Random.Shared.Next(gifMin, gifMax + 1);
+        _nextIdleGifMs = nowMs + Random.Shared.Next(45_000, 90_001);
 
         var (meowMin, meowMax) = _settings.IdleMeowIntervalMs();
         _nextIdleMeowMs = nowMs + Random.Shared.Next(meowMin, meowMax + 1);
@@ -655,6 +753,7 @@ public sealed class Pet : IDisposable
                 _idleActive = false;
                 _idleGif = null;
                 _idleClockMs = 0;
+                if (!_musicDanceMode) _dancePoseActive = false;
                 _dirty = true;
             }
         }
@@ -682,6 +781,16 @@ public sealed class Pet : IDisposable
 
         if (_settings.Enabled && !pause)
         {
+            // Occasionally stumble only when the pet is visibly high on the screen.
+            // Y is the window's top coordinate, so compare against the upper half
+            // of the usable work area rather than the sprite's bottom position.
+            if (nowMs >= _nextStumbleMs)
+            {
+                _nextStumbleMs = nowMs + Random.Shared.Next(25_000, 70_001);
+                float halfway = _workArea.Top + _workArea.Height * 0.5f;
+                if (Y < halfway && !Busy && !_sleeping && !IsBeingDragged)
+                    OnStumble(nowMs);
+            }
             ShouldSleep(nowMs);
             TickIdleGif(nowMs);
             TickIdleMeow(nowMs);
@@ -784,20 +893,24 @@ public sealed class Pet : IDisposable
 
     private bool StepWalk(float dt)
     {
-        float target = _wanderTargetX;
-        float dx = target - X;
-        float step = MathF.Abs(dx);
-
-        if (step < 2f)
+        float dx = _wanderTargetX - X;
+        float dy = _wanderTargetY - Y;
+        float distance = MathF.Sqrt(dx * dx + dy * dy);
+        if (distance < 3f)
         {
+            X = _wanderTargetX;
+            Y = _wanderTargetY;
+            ClampToWorkArea();
             EndWalk();
             return false;
         }
 
-        float speed = Math.Clamp(step * 1.5f, WalkSpeedMin, WalkSpeedMax) * _settings.SpeedScale;
-        float dir = MathF.Sign(dx);
-        X += dir * speed * dt;
-        _facing = dir >= 0 ? 1 : -1;
+        float speed = Math.Clamp(distance * 1.15f, WalkSpeedMin, WalkSpeedMax) * _settings.SpeedScale;
+        float step = Math.Min(distance, speed * dt);
+        X += dx / distance * step;
+        Y += dy / distance * step;
+        ClampToWorkArea();
+        if (MathF.Abs(dx) > 2f) _facing = dx >= 0 ? 1 : -1;
         _walkPhase += dt * speed * 0.08f;
         return true;
     }
@@ -864,6 +977,15 @@ public sealed class Pet : IDisposable
         _dirty = true;
     }
 
+    public void WakeFromMenu(double nowMs)
+    {
+        _nowMs = nowMs;
+        StopTransientAnimations();
+        WakeUp(nowMs);
+        _lastInteractionMs = nowMs;
+        _dirty = true;
+    }
+
     private void WakeUp(double nowMs)
     {
         if (!_sleeping) return;
@@ -877,10 +999,9 @@ public sealed class Pet : IDisposable
     {
         if (nowMs < _nextIdleGifMs) return;
 
-        var (min, max) = _settings.IdleGifIntervalMs();
-        // Keep the dance as an occasional surprise rather than a constant loop.
-        min = Math.Max(min, 150_000);
-        max = Math.Max(max, 240_000);
+        // Random events are intentionally more frequent than the old 2.5–4 min cadence.
+        int min = 45_000;
+        int max = 90_000;
         _nextIdleGifMs = nowMs + Random.Shared.Next(min, max + 1);
 
         if (!_settings.IdleGifEnabled || Busy) return;
@@ -896,6 +1017,8 @@ public sealed class Pet : IDisposable
     }
 
     private double _idleEndsMs;
+    private bool _musicDanceMode;
+    private bool _dancePoseActive;
 
     private AnimatedGif? PickIdleGif()
     {
@@ -958,13 +1081,22 @@ public sealed class Pet : IDisposable
 
         if (Busy || _sleeping) return;
 
-        // Choose a new spot along the current floor level, biased away from
-        // the nearest wall so the pet doesn't pace in a corner.
+        // Pick a destination anywhere in the usable work area. Keep the
+        // pet's body inside the monitor, but allow both vertical and diagonal
+        // walks rather than only pacing along the bottom edge.
         float minX = _workArea.Left - (_pivotX - _bodyRx);
         float maxX = _workArea.Right - (_pivotX + _bodyRx);
-        if (maxX <= minX) return;
+        float minY = _workArea.Top - (_pivotY - _bodyRy);
+        float maxY = _workArea.Bottom - WindowH - FloorGap;
+        if (maxX <= minX || maxY <= minY) return;
 
         _wanderTargetX = minX + Random.Shared.NextSingle() * (maxX - minX);
+        // Bias toward lower areas, but periodically let the pet climb higher.
+        float verticalPick = Random.Shared.NextSingle();
+        float verticalBias = verticalPick * verticalPick;
+        _wanderTargetY = minY + verticalBias * (maxY - minY);
+        if (MathF.Abs(_wanderTargetX - X) < 70f && MathF.Abs(_wanderTargetY - Y) < 55f)
+            _wanderTargetY = minY + Random.Shared.NextSingle() * (maxY - minY);
         _activity = PetActivity.Walking;
         _walkPhase = 0f;
         _dirty = true;
@@ -1082,6 +1214,18 @@ public sealed class Pet : IDisposable
         }
 
         p.Angle = 0.025f * MathF.Sin(t * 1.15f) + _tilt;
+
+        // A small procedural dance layered over the available sprite animation.
+        // This keeps dancing visible even though the source asset pack has no dedicated dance GIF.
+        if (_dancePoseActive)
+        {
+            float danceBeat = t * 10.5f;
+            float side = MathF.Sin(danceBeat);
+            p.Jump += 8f + MathF.Abs(MathF.Sin(danceBeat * 0.5f)) * 12f;
+            p.Angle += side * 0.18f;
+            p.ScaleX += 0.035f * MathF.Sin(danceBeat + MathF.PI / 2f);
+            p.ScaleY += 0.045f * MathF.Abs(MathF.Sin(danceBeat));
+        }
 
         // Hop envelope after a poke.
         float e = (float)((nowMs - _hopAtMs) / 1000.0);

@@ -65,6 +65,18 @@ public sealed class PetSettings
 
     public bool SoundsEnabled { get; set; } = true;
 
+    /// <summary>Whether first-run setup has been completed.</summary>
+    public bool FirstRunCompleted { get; set; } = false;
+
+    /// <summary>Launch automatically when the current Windows user signs in.</summary>
+    public bool LaunchAtStartup { get; set; } = false;
+
+    // Windows-native reactions (best-effort; toast markup differs by Windows build).
+    public bool NotificationReactionEnabled { get; set; } = true;
+    public bool LoudSoundReactionEnabled { get; set; } = true;
+    public bool MusicDanceEnabled { get; set; } = true;
+    public bool MusicDanceAlways { get; set; } = false; // false = 80% chance, true = 100%
+
     /// <summary>Physics knobs, exposed because they are the most fun to tune.</summary>
     public float GravityScale { get; set; } = 1.0f;
     public float SpeedScale { get; set; } = 1.0f;
