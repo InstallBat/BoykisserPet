@@ -64,6 +64,24 @@ public sealed class PetSettings
     public bool PauseOnFullscreen { get; set; } = true;
 
     public bool SoundsEnabled { get; set; } = true;
+    public bool FreakyModEnabled { get; set; } = false;
+    public bool LocalAiEnabled { get; set; } = true;
+    public bool GlobalHotkeysEnabled { get; set; } = false;
+    public bool DeveloperModeEnabled { get; set; } = false;
+
+    // Optional cursor/meme events. Disabled by default to preserve the original behaviour.
+    public bool CursorChaseEnabled { get; set; } = true;
+    public bool CursorKnockEnabled { get; set; } = true;
+    /// <summary>In normal mode, a successful pounce nudges the pointer downward.</summary>
+    public bool CursorHitBumpEnabled { get; set; } = true;
+    /// <summary>Downward pointer nudge strength in normal mode, 0–100 percent.</summary>
+    public int CursorHitBumpStrength { get; set; } = 45;
+    public int CursorChasePreset { get; set; } = DefaultPresetIndex;
+    public bool MemeEventEnabled { get; set; } = true;
+    public int MemeEventPreset { get; set; } = DefaultPresetIndex;
+
+    public (int MinMs, int MaxMs) CursorChaseIntervalMs() => PresetToMs(IdleGifPresets, CursorChasePreset);
+    public (int MinMs, int MaxMs) MemeEventIntervalMs() => PresetToMs(IdleGifPresets, MemeEventPreset);
 
     /// <summary>Whether first-run setup has been completed.</summary>
     public bool FirstRunCompleted { get; set; } = false;
@@ -147,6 +165,9 @@ public sealed class PetSettings
         SleepTimeoutPreset = Math.Clamp(SleepTimeoutPreset, 0, SleepTimeoutPresetsSec.Length - 1);
         WanderPreset = Math.Clamp(WanderPreset, 0, IdleGifPresets.Length - 1);
         ChatterPreset = Math.Clamp(ChatterPreset, 0, IdleGifPresets.Length - 1);
+        CursorChasePreset = Math.Clamp(CursorChasePreset, 0, IdleGifPresets.Length - 1);
+        CursorHitBumpStrength = Math.Clamp(CursorHitBumpStrength, 0, 100);
+        MemeEventPreset = Math.Clamp(MemeEventPreset, 0, IdleGifPresets.Length - 1);
         GravityScale = Math.Clamp(GravityScale, 0.2f, 3.0f);
         SpeedScale = Math.Clamp(SpeedScale, 0.2f, 3.0f);
 
@@ -178,6 +199,7 @@ public sealed class PetConfig
     public const int MaxAlpha = 100;
 
     public string Name { get; set; } = string.Empty;
+    public string Skin { get; set; } = "boykisser";
     public int Size { get; set; } = 140;
     public int AlphaPercent { get; set; } = 100;
 

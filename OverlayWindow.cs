@@ -22,6 +22,9 @@ public sealed class OverlayWindow : Form
     /// <summary>Set when the cursor is over an interactive part of this window.</summary>
     public bool Interactive { get; set; }
 
+    /// <summary>Raised when the user clicks this overlay.</summary>
+    public event Action<OverlayWindow>? DismissRequested;
+
     public OverlayWindow(int width, int height)
     {
         _width = width;
@@ -39,6 +42,7 @@ public sealed class OverlayWindow : Form
         // Must remain enabled to receive mouse input; ShowWithoutActivation and
         // WS_EX_NOACTIVATE prevent it from stealing keyboard focus.
         Enabled = true;
+        MouseClick += (_, _) => DismissRequested?.Invoke(this);
 
         _buffer = new Bitmap(width, height, PixelFormat.Format32bppPArgb);
 
@@ -70,8 +74,11 @@ public sealed class OverlayWindow : Form
             Native.SetWindowLongPtr(Handle, Native.GWL_EXSTYLE, new IntPtr(updated));
     }
 
-    /// <summary>Pushes a fully-composed frame to the screen at <paramref name="x"/>,<paramref name="y"/>.</summary>
-    public void Present(Bitmap frame, int x, int y)
+    /// <summary>
+    /// Pushes a fully-composed frame to the screen at <paramref name="x"/>,<paramref name="y"/>.
+    /// <paramref name="alpha"/> fades the whole window (255 = opaque).
+    /// </summary>
+    public void Present(Bitmap frame, int x, int y, byte alpha = 255)
     {
         // Reassert topmost placement each frame in case another app changed z-order.
         Native.SetWindowPos(Handle, Native.HWND_TOPMOST, x, y, frame.Width, frame.Height,
@@ -94,7 +101,7 @@ public sealed class OverlayWindow : Form
             {
                 BlendOp = Native.AC_SRC_OVER,
                 BlendFlags = 0,
-                SourceConstantAlpha = 255,
+                SourceConstantAlpha = alpha,
                 AlphaFormat = Native.AC_SRC_ALPHA
             };
 

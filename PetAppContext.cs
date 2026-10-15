@@ -18,6 +18,7 @@ public sealed class PetAppContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _timer;
     private readonly NotifyIcon _tray;
     private HotkeyWindow? _hotkeys;
+    private bool _hotkeysEnabledApplied;
     private readonly SystemReactions _systemReactions;
 
     private double _lastTickMs;
@@ -25,7 +26,12 @@ public sealed class PetAppContext : ApplicationContext
     private double _lastFullscreenCheckMs = -10000;
     private int _nextPetIndex;
     private bool _shuttingDown;
+    private double _lastFreakyMs = -10000;
+    private PhraseBank? _freakyDeck;
     private double _lastSystemCheckMs = -15_000;
+    private double _lastForegroundScanMs = -10_000;
+    private double _lastForegroundReactionMs = -30_000;
+    private string _lastForegroundProcess = string.Empty;
     private double _lastLowBatteryAlertMs = -1_000_000;
     private DateOnly? _lastNightAlertDate;
 
@@ -36,6 +42,11 @@ public sealed class PetAppContext : ApplicationContext
         public bool PressActive;
         public Point PressOrigin;
         public bool PressZone;
+        public OverlayWindow? CarriedMemeWindow;
+        public Bitmap? LastCarriedBitmap;
+        public readonly List<(OverlayWindow Window, double ExpiresAtMs)> DroppedMemeWindows = new();
+        public ChatBarForm? ChatBar;
+        public bool ChatBarRequested;
     }
 
     public PetAppContext()
@@ -50,6 +61,7 @@ public sealed class PetAppContext : ApplicationContext
             {
                 if (_settings.Pets.Count == 0) _settings.Pets.Add(new PetConfig());
                 _settings.Pets[0].Name = setup.PetName;
+                _settings.Pets[0].Skin = setup.Skin;
                 _settings.LaunchAtStartup = setup.LaunchAtStartup;
                 _settings.FirstRunCompleted = true;
                 StartupRegistration.SetEnabled(_settings.LaunchAtStartup);
@@ -73,7 +85,8 @@ public sealed class PetAppContext : ApplicationContext
             SpawnPet(config);
 
         _tray = BuildTrayIcon();
-        _hotkeys = new HotkeyWindow(TogglePause, TalkToAll, RollAll, AddPet, ShowSettings);
+        _hotkeysEnabledApplied = _settings.GlobalHotkeysEnabled;
+        _hotkeys = new HotkeyWindow(TogglePause, TalkToAll, RollAll, AddPet, ShowSettings, _hotkeysEnabledApplied);
 
         _timer = new System.Windows.Forms.Timer { Interval = 16 };
         _timer.Tick += OnTick;
@@ -100,6 +113,9 @@ public sealed class PetAppContext : ApplicationContext
         };
 
         var runtime = new PetRuntime { Pet = pet, Window = window };
+        runtime.ChatBar = new ChatBarForm();
+        runtime.ChatBar.MessageSubmitted += message => { runtime.ChatBarRequested = false; HandleChatMessage(runtime, message); };
+        runtime.ChatBar.Dismissed += () => runtime.ChatBarRequested = false;
         AttachInput(runtime);
 
         window.Show();
@@ -160,8 +176,44 @@ public sealed class PetAppContext : ApplicationContext
         window.MouseUp += (_, e) =>
         {
             if (e.Button == MouseButtons.Right)
+            {
+                ShowChatBar(runtime, focusNow: false);
                 ShowPetMenu(runtime, Cursor.Position);
+            }
         };
+    }
+
+    private void UpdateChatBar(PetRuntime runtime, bool overPet)
+    {
+        ChatBarForm? bar = runtime.ChatBar;
+        if (bar is null || bar.IsDisposed) return;
+        // The input is deliberately not hover-triggered. It appears only after a
+        // right-click/context-menu request, and stays while focused or requested.
+        bool keepVisible = _settings.LocalAiEnabled && (runtime.ChatBarRequested || bar.ContainsFocus);
+        if (!keepVisible)
+        {
+            if (bar.Visible) bar.Hide();
+            return;
+        }
+        Rectangle bounds = new((int)runtime.Pet.X, (int)runtime.Pet.Y, runtime.Pet.WindowW, runtime.Pet.WindowH);
+        Rectangle work = Native.WorkAreaOf(bounds);
+        bar.PositionBelow(bounds, work);
+        if (!bar.Visible)
+        {
+            bar.Show();
+            bar.BringToFront();
+        }
+    }
+
+    private void ShowChatBar(PetRuntime runtime, bool focusNow = true)
+    {
+        if (!_settings.LocalAiEnabled || runtime.ChatBar is null || runtime.ChatBar.IsDisposed) return;
+        runtime.ChatBarRequested = true;
+        Rectangle bounds = new((int)runtime.Pet.X, (int)runtime.Pet.Y, runtime.Pet.WindowW, runtime.Pet.WindowH);
+        runtime.ChatBar.PositionBelow(bounds, Native.WorkAreaOf(bounds));
+        if (!runtime.ChatBar.Visible) runtime.ChatBar.Show();
+        runtime.ChatBar.BringToFront();
+        if (focusNow) runtime.ChatBar.FocusInput();
     }
 
     private static bool CursorOverPet(PetRuntime runtime, Point screen)
@@ -173,6 +225,13 @@ public sealed class PetAppContext : ApplicationContext
 
     private void OnTick(object? sender, EventArgs e)
     {
+        if (_hotkeysEnabledApplied != _settings.GlobalHotkeysEnabled)
+        {
+            _hotkeys?.Dispose();
+            _hotkeysEnabledApplied = _settings.GlobalHotkeysEnabled;
+            _hotkeys = new HotkeyWindow(TogglePause, TalkToAll, RollAll, AddPet, ShowSettings, _hotkeysEnabledApplied);
+            _settings.Save();
+        }
         double now = NowMs;
         float dt = (float)Math.Min((now - _lastTickMs) / 1000.0, 0.05);
         _lastTickMs = now;
@@ -194,18 +253,52 @@ public sealed class PetAppContext : ApplicationContext
 
         HandleSystemReactions(now);
 
+        if (now - _lastForegroundScanMs >= 2000)
+        {
+            _lastForegroundScanMs = now;
+            var foreground = Native.ForegroundApp();
+            string process = foreground.ProcessName;
+            DesktopActions.ObserveForeground(process, foreground.WindowTitle);
+            if (!string.IsNullOrWhiteSpace(process) && !process.Equals("BoykisserPet", StringComparison.OrdinalIgnoreCase)
+                && !process.Equals(_lastForegroundProcess, StringComparison.OrdinalIgnoreCase))
+            {
+                _lastForegroundProcess = process;
+                if (now - _lastForegroundReactionMs >= 25_000)
+                {
+                    string comment = DesktopActions.CurrentAppComment(process, foreground.WindowTitle);
+                    if (!string.IsNullOrWhiteSpace(comment) && _pets.Count > 0 && _settings.ChatterEnabled)
+                    {
+                        _pets[Random.Shared.Next(_pets.Count)].Pet.Say(now, comment);
+                        _lastForegroundReactionMs = now;
+                    }
+                }
+            }
+        }
+
         foreach (PetRuntime runtime in _pets)
         {
             Pet pet = runtime.Pet;
             bool moved = pet.Update(now, dt, _fullscreenActive);
+            UpdateMemeOverlays(runtime);
 
             bool overPet = CursorOverPet(runtime, Cursor.Position);
+            UpdateChatBar(runtime, overPet);
+            if (_settings.FreakyModEnabled && overPet && now - _lastFreakyMs > 1800)
+            {
+                _lastFreakyMs = now;
+                Rectangle screen = Screen.FromPoint(Cursor.Position).Bounds;
+                Cursor.Position = new Point(Math.Clamp(Cursor.Position.X, screen.Left, screen.Right - 1), screen.Bottom - 1);
+                PlayFreakySound();
+                _freakyDeck ??= new PhraseBank(LoadFreakyPhrases());
+                pet.Say(now, _freakyDeck.Next());
+            }
             bool busy = overPet || runtime.PressActive || pet.IsBeingDragged || pet.NeedsAnimationFrame;
 
             // Update input routing every tick, even when no repaint is needed.
             // Otherwise the transparent overlay can remain click-through (or
             // intercept the desktop) after the cursor moves.
-            runtime.Window.SetClickThrough(!(overPet || runtime.PressActive || pet.IsBeingDragged));
+            bool overChatBar = runtime.ChatBar is { Visible: true } bar && bar.Bounds.Contains(Cursor.Position);
+            runtime.Window.SetClickThrough(!(overPet || runtime.PressActive || pet.IsBeingDragged) || overChatBar);
             bool needsPaint = moved || pet.IsDirty || busy;
             if (!needsPaint) continue;
 
@@ -215,6 +308,109 @@ public sealed class PetAppContext : ApplicationContext
             runtime.Window.Present(runtime.Window.Buffer, (int)pet.X, (int)pet.Y);
             pet.MarkClean();
         }
+    }
+
+    private static string[] LoadFreakyPhrases()
+    {
+        try
+        {
+            string path = Path.Combine(AppContext.BaseDirectory, "FreakyPhrases.txt");
+            string[] lines;
+            if (File.Exists(path))
+                lines = File.ReadAllLines(path);
+            else
+            {
+                var assembly = Assembly.GetExecutingAssembly();
+                string? resource = assembly.GetManifestResourceNames().FirstOrDefault(n => n.EndsWith(".FreakyPhrases.txt", StringComparison.OrdinalIgnoreCase));
+                if (resource is null) return new[] { "Эй, курсор! Полегче!" };
+                using Stream? stream = assembly.GetManifestResourceStream(resource);
+                if (stream is null) return new[] { "Эй, курсор! Полегче!" };
+                using var reader = new StreamReader(stream);
+                lines = reader.ReadToEnd().Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            }
+            string[] cleaned = lines.Select(x => x.Trim())
+                .Where(x => x.Length > 0 && !x.StartsWith("#", StringComparison.Ordinal))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            return cleaned.Length > 0 ? cleaned : new[] { "Эй, курсор! Полегче!" };
+        }
+        catch { return new[] { "Эй, курсор! Полегче!" }; }
+    }
+
+    private void UpdateMemeOverlays(PetRuntime runtime)
+    {
+        double nowMs = NowMs;
+        for (int i = runtime.DroppedMemeWindows.Count - 1; i >= 0; i--)
+        {
+            if (nowMs < runtime.DroppedMemeWindows[i].ExpiresAtMs) continue;
+            runtime.DroppedMemeWindows[i].Window.Dispose();
+            runtime.DroppedMemeWindows.RemoveAt(i);
+        }
+
+        Bitmap? carried = runtime.Pet.CarriedMemeBitmap;
+        if (carried is not null)
+        {
+            if (runtime.CarriedMemeWindow is null || runtime.LastCarriedBitmap is null ||
+                runtime.LastCarriedBitmap.Width != carried.Width || runtime.LastCarriedBitmap.Height != carried.Height)
+            {
+                runtime.CarriedMemeWindow?.Hide();
+                runtime.CarriedMemeWindow?.Dispose();
+                runtime.CarriedMemeWindow = new OverlayWindow(carried.Width, carried.Height);
+                runtime.CarriedMemeWindow.SetClickThrough(true);
+                runtime.LastCarriedBitmap = carried;
+            }
+            Rectangle bounds = runtime.Pet.CarriedMemeBounds;
+            runtime.CarriedMemeWindow.Present(carried, bounds.X, bounds.Y);
+        }
+        else if (runtime.CarriedMemeWindow is not null)
+        {
+            runtime.CarriedMemeWindow.Hide();
+            runtime.CarriedMemeWindow.Dispose();
+            runtime.CarriedMemeWindow = null;
+            runtime.LastCarriedBitmap = null;
+        }
+
+        Bitmap? dropped = runtime.Pet.TakeDeliveredMeme(out Point location);
+        if (dropped is not null)
+        {
+            try
+            {
+                var picture = new OverlayWindow(dropped.Width, dropped.Height);
+                // Delivered memes are interactive: click anywhere on the picture to dismiss it.
+                picture.SetClickThrough(false);
+                // A layered, no-activate window may not always raise MouseClick
+                // consistently. Dismiss on the first left-button MouseDown instead,
+                // so a single click anywhere on the meme closes it immediately.
+                picture.MouseDown += (_, e) =>
+                {
+                    if (e.Button != MouseButtons.Left) return;
+                    int index = runtime.DroppedMemeWindows.FindIndex(entry => ReferenceEquals(entry.Window, picture));
+                    if (index >= 0) runtime.DroppedMemeWindows.RemoveAt(index);
+                    picture.Hide();
+                    picture.Dispose();
+                };
+                picture.Present(dropped, location.X, location.Y);
+                runtime.DroppedMemeWindows.Add((picture, nowMs + 180_000));
+                while (runtime.DroppedMemeWindows.Count > 5)
+                {
+                    runtime.DroppedMemeWindows[0].Window.Dispose();
+                    runtime.DroppedMemeWindows.RemoveAt(0);
+                }
+            }
+            finally { dropped.Dispose(); }
+        }
+    }
+
+    private static void PlayFreakySound()
+    {
+        try
+        {
+            string? path = Assets.SoundPath("freaky.mp3");
+            if (path is null) return;
+            string alias = Mci.NextAlias("freaky");
+            if (Mci.Open(path, alias)) { Mci.Send($"play {alias}"); }
+        }
+        catch { }
     }
 
     private void HandleSystemReactions(double now)
@@ -369,7 +565,10 @@ public sealed class PetAppContext : ApplicationContext
         _pets.RemoveAt(_pets.Count - 1);
         _settings.Pets.RemoveAt(_settings.Pets.Count - 1);
         last.Window.Hide();
+        last.CarriedMemeWindow?.Dispose();
+        foreach (var picture in last.DroppedMemeWindows) picture.Window.Dispose();
         last.Window.Dispose();
+        last.ChatBar?.Dispose();
         last.Pet.Dispose();
         _settings.Save();
         UpdateTrayText();
@@ -389,7 +588,10 @@ public sealed class PetAppContext : ApplicationContext
         foreach (PetRuntime r in _pets)
         {
             r.Window.Hide();
+            r.CarriedMemeWindow?.Dispose();
+            foreach (var picture in r.DroppedMemeWindows) picture.Window.Dispose();
             r.Window.Dispose();
+            r.ChatBar?.Dispose();
             r.Pet.Dispose();
         }
         _pets.Clear();
@@ -417,12 +619,31 @@ public sealed class PetAppContext : ApplicationContext
         menu.Items.Add(header);
         menu.Items.Add(new ToolStripSeparator());
 
-        menu.Items.Add("Поговорить", null, (_, _) => runtime.Pet.OnTalk(NowMs));
+        menu.Items.Add("Поговорить", null, (_, _) =>
+        {
+            if (_settings.LocalAiEnabled) ShowChatBar(runtime);
+            else runtime.Pet.OnTalk(NowMs);
+        });
         menu.Items.Add("Погладить", null, (_, _) => runtime.Pet.OnPet(NowMs));
         menu.Items.Add("Покормить", null, (_, _) => runtime.Pet.OnFeed(NowMs));
         menu.Items.Add("Танцевать (7 секунд)", null, (_, _) => runtime.Pet.StartDance(NowMs));
         menu.Items.Add("Кувыркнуться", null, (_, _) => runtime.Pet.OnRoll(NowMs));
         menu.Items.Add("Разбудить", null, (_, _) => runtime.Pet.WakeFromMenu(NowMs));
+        menu.Items.Add("Притащить мем", null, (_, _) => runtime.Pet.ShowRandomMeme(NowMs));
+        menu.Items.Add("Бегать за курсором", null, (_, _) => runtime.Pet.StartCursorChase(NowMs));
+        if (_settings.DeveloperModeEnabled)
+        {
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Заморозить / разморозить позицию", null, (_, _) => runtime.Pet.TogglePositionFreeze());
+            var actions = new ToolStripMenuItem("Вызвать действие");
+            actions.DropDownItems.Add("Танец", null, (_, _) => runtime.Pet.StartDance(NowMs));
+            actions.DropDownItems.Add("Кувырок", null, (_, _) => runtime.Pet.OnRoll(NowMs));
+            actions.DropDownItems.Add("Погладить", null, (_, _) => runtime.Pet.OnPet(NowMs));
+            actions.DropDownItems.Add("Мем", null, (_, _) => runtime.Pet.ShowRandomMeme(NowMs));
+            menu.Items.Add(actions);
+            menu.Items.Add("Сказать тестовую реплику", null, (_, _) => runtime.Pet.Say(NowMs, "Режим разработчика активен."));
+            menu.Items.Add("Переключить молчание", null, (_, _) => runtime.Pet.ToggleSilent());
+        }
 
         var sizeMenu = new ToolStripMenuItem("Размер");
         foreach (int size in new[] { 80, 110, 140, 180, 240, 320 })
@@ -451,7 +672,35 @@ public sealed class PetAppContext : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Выход", null, (_, _) => Shutdown()));
 
+        DarkTheme.Apply(menu);
+        menu.Closed += (_, _) =>
+        {
+            if (runtime.ChatBarRequested && runtime.ChatBar is { IsDisposed: false })
+                runtime.ChatBar.FocusInput();
+        };
         menu.Show(screen);
+    }
+
+    private void HandleChatMessage(PetRuntime runtime, string message)
+    {
+        string lower = message.ToLowerInvariant();
+        double now = NowMs;
+        if (new[] { "остановись", "останови", "стой", "хватит", "харэ", "харе", "прекрати", "перестань", "стоп", "не гонись", "не тащи", "останови погоню" }.Any(lower.Contains))
+        {
+            runtime.Pet.StopCurrentAction(now);
+            runtime.Pet.Say(now, LocalPetBrain.Reply(runtime.Pet.Config.Name, message, runtime.Pet.Config.Skin));
+            return;
+        }
+        if (DesktopActions.TryHandle(message, out string actionReply))
+        {
+            runtime.Pet.Say(now, actionReply);
+            return;
+        }
+        if (lower.Contains("танц")) runtime.Pet.StartDance(now);
+        else if (lower.Contains("мем") || lower.Contains("картин")) runtime.Pet.ShowRandomMeme(now);
+        else if (lower.Contains("кувырк") || lower.Contains("сальто")) runtime.Pet.OnRoll(now);
+        else if (lower.Contains("курсор") || lower.Contains("поймай") || lower.Contains("догон")) runtime.Pet.StartCursorChase(now);
+        runtime.Pet.Say(now, LocalPetBrain.Reply(runtime.Pet.Config.Name, message, runtime.Pet.Config.Skin));
     }
 
     private NotifyIcon BuildTrayIcon()
@@ -466,6 +715,8 @@ public sealed class PetAppContext : ApplicationContext
         menu.Items.Add("Настройки…", null, (_, _) => ShowSettings());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Выход", null, (_, _) => Shutdown());
+
+        DarkTheme.Apply(menu);
 
         var icon = new NotifyIcon
         {
@@ -572,7 +823,10 @@ public sealed class PetAppContext : ApplicationContext
         foreach (PetRuntime r in _pets)
         {
             r.Window.Hide();
+            r.CarriedMemeWindow?.Dispose();
+            foreach (var picture in r.DroppedMemeWindows) picture.Window.Dispose();
             r.Window.Dispose();
+            r.ChatBar?.Dispose();
             r.Pet.Dispose();
         }
         _pets.Clear();

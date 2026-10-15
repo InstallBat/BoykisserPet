@@ -46,12 +46,12 @@ public sealed class SettingsForm : Form
             Height = 48,
             Padding = new Padding(10, 6, 10, 6),
             ForeColor = SystemColors.GrayText,
-            Text = "Hotkeys (global):  Ctrl+Shift+B pause · Ctrl+Shift+T talk · "
-                 + "Ctrl+Shift+R roll · Ctrl+Shift+A add pet · Ctrl+Shift+S settings"
+            Text = "Глобальные хоткеи отключены по умолчанию. Их можно включить в настройках."
         };
 
         Controls.Add(tabs);
         Controls.Add(hint);
+        DarkTheme.Apply(this);
     }
 
     private TabPage BuildBehaviourTab()
@@ -64,6 +64,12 @@ public sealed class SettingsForm : Form
 
         AddCheck(flow, "Show pets", _settings.Enabled, v => _settings.Enabled = v);
         AddCheck(flow, "Sounds", _settings.SoundsEnabled, v => _settings.SoundsEnabled = v);
+        AddCheck(flow, "Freaky Mod (курсор падает при касании; охота быстрее)", _settings.FreakyModEnabled, v => _settings.FreakyModEnabled = v);
+        AddCheck(flow, "Локальный чат с питомцем", _settings.LocalAiEnabled, v => _settings.LocalAiEnabled = v);
+        AddCheck(flow, "Включить глобальные хоткеи", _settings.GlobalHotkeysEnabled, v => _settings.GlobalHotkeysEnabled = v);
+        AddCheck(flow, "Режим разработчика (ПКМ-меню)", _settings.DeveloperModeEnabled, v => _settings.DeveloperModeEnabled = v);
+        AddSectionHeader(flow, "Версия");
+        flow.Controls.Add(new Label { Text = "Версия приложения: 3.0.0", AutoSize = true, Padding = new Padding(4) });
         AddCheck(flow, "Pause while a full-screen app is in front",
             _settings.PauseOnFullscreen, v => _settings.PauseOnFullscreen = v);
 
@@ -169,6 +175,19 @@ public sealed class SettingsForm : Form
             nameRow.Controls.Add(nameBox);
             _petList.Controls.Add(nameRow);
 
+            var skinRow = new FlowLayoutPanel { Width = 410, Height = 34, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            skinRow.Controls.Add(new Label { Text = "Skin", Width = 110, TextAlign = ContentAlignment.MiddleLeft });
+            var skinBox = new ComboBox { Width = 285, DropDownStyle = ComboBoxStyle.DropDownList };
+            skinBox.Items.AddRange(new object[] { "Бойкиссер", "Нико", "Экспи" });
+            skinBox.SelectedIndex = config.Skin switch { "niko" => 1, "expie" => 2, _ => 0 };
+            skinBox.SelectedIndexChanged += (_, _) =>
+            {
+                _settings.Pets[index].Skin = skinBox.SelectedIndex switch { 1 => "niko", 2 => "expie", _ => "boykisser" };
+                Notify();
+            };
+            skinRow.Controls.Add(skinBox);
+            _petList.Controls.Add(skinRow);
+
             var sizeRow = new FlowLayoutPanel { Width = 410, Height = 34, FlowDirection = FlowDirection.LeftToRight };
             sizeRow.Controls.Add(new Label { Text = "Size (px)", Width = 110, TextAlign = ContentAlignment.MiddleLeft });
             var sizeValue = new Label { Text = config.Size.ToString(), Width = 42, TextAlign = ContentAlignment.MiddleRight };
@@ -230,6 +249,20 @@ public sealed class SettingsForm : Form
             _settings.WanderEnabled, v => _settings.WanderEnabled = v);
         AddCombo(flow, "Wander frequency", PetSettings.SpeedPresetLabels, _settings.WanderPreset,
             v => _settings.WanderPreset = v);
+
+        AddSectionHeader(flow, "Event frequency (normal mode only; Freaky Mode ignores these rates)");
+        AddCheck(flow, "Cursor-hunt events enabled", _settings.CursorChaseEnabled, v => _settings.CursorChaseEnabled = v);
+        AddCombo(flow, "Cursor-hunt frequency", PetSettings.SpeedPresetLabels, _settings.CursorChasePreset,
+            v => _settings.CursorChasePreset = v);
+        AddCheck(flow, "Bring-a-meme events enabled", _settings.MemeEventEnabled, v => _settings.MemeEventEnabled = v);
+        AddCombo(flow, "Meme frequency", PetSettings.SpeedPresetLabels, _settings.MemeEventPreset,
+            v => _settings.MemeEventPreset = v);
+
+        AddSectionHeader(flow, "Cursor hit (normal mode only)");
+        AddCheck(flow, "Nudge cursor down when a jump hits it",
+            _settings.CursorHitBumpEnabled, v => _settings.CursorHitBumpEnabled = v);
+        AddSlider(flow, "Downward nudge", 0f, 100f, _settings.CursorHitBumpStrength,
+            v => _settings.CursorHitBumpStrength = (int)MathF.Round(v));
 
         AddSectionHeader(flow, "Physics");
         AddSlider(flow, "Gravity", 0.2f, 3.0f, _settings.GravityScale,

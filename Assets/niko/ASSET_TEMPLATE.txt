@@ -1,0 +1,3 @@
+# Niko assets
+# Place skin-specific files here. Supported names follow Assets/boykisser.
+# Missing optional animation sprites fall back safely.

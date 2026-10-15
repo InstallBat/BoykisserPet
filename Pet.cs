@@ -16,7 +16,7 @@ public enum PetActivity
 /// scaleX/scaleY, ImageDrawable swapping) is expressed here as state that the
 /// host window paints each frame.
 /// </summary>
-public sealed class Pet : IDisposable
+public sealed partial class Pet : IDisposable
 {
     // ---- animation durations, ported from the plugin ----
     private const int AnimDurationMs = 1250;
@@ -116,6 +116,8 @@ public sealed class Pet : IDisposable
 
     /// <summary>Remembers the last event that should keep the frame rate high.</summary>
     private bool _dirty;
+    private bool _positionFrozen;
+    private bool _silent;
 
     // ---- autonomous behaviour timers ----
     private double _nextIdleGifMs;
@@ -142,7 +144,7 @@ public sealed class Pet : IDisposable
         _workArea = workArea;
         _nowMs = nowMs;
 
-        _audio = new PetAudio(Assets.SoundPath(Assets.MeowMp3), Assets.SoundPath(Assets.PurrMp3), Assets.SoundPath(Assets.FeedMp3));
+        _audio = new PetAudio(config.Skin.Equals("expie", StringComparison.OrdinalIgnoreCase) ? null : Assets.SoundPath(Assets.MeowMp3), Assets.SoundPath(Assets.PurrMp3, config.Skin), Assets.SoundPath(Assets.FeedMp3, config.Skin), Assets.SoundPath("rummage.mp3", config.Skin));
 
         LoadSprites();
 
@@ -162,6 +164,8 @@ public sealed class Pet : IDisposable
 
         _lastInteractionMs = nowMs;
         ScheduleAll(nowMs);
+        ScheduleNextChase(nowMs);
+        ScheduleNextMeme(nowMs);
     }
 
     // ------------------------------------------------------------------ //
@@ -182,14 +186,14 @@ public sealed class Pet : IDisposable
         _pivotX = WindowW / 2f;
         _pivotY = WindowH - 30f - ExhaustGap();
 
-        _base = Assets.Gif(Assets.BaseGif, SpriteW, SpriteH);
-        _petHand = Assets.Gif(Assets.PetGif, SpriteW, SpriteH);
-        _petMain = Assets.Gif(Assets.PetMainGif, SpriteW, SpriteH);
-        _sleep = Assets.Gif(Assets.SleepGif, SpriteW, SpriteH);
+        _base = Assets.Gif(Config.Skin == "expie" ? "boykisser.gif" : Assets.BaseGif, SpriteW, SpriteH, Config.Skin);
+        _petHand = Assets.Gif(Assets.PetGif, SpriteW, SpriteH, Config.Skin);
+        _petMain = Assets.Gif(Assets.PetMainGif, SpriteW, SpriteH, Config.Skin);
+        _sleep = Assets.Gif(Assets.SleepGif, SpriteW, SpriteH, Config.Skin);
 
         _idleGifs.Clear();
         foreach (string name in Assets.IdleGifs)
-            _idleGifs.Add(Assets.Gif(name, SpriteW, SpriteH));
+            _idleGifs.Add(Assets.Gif(name, SpriteW, SpriteH, Config.Skin));
 
         // Body ellipse inscribed in the sprite, matching the reference's
         // slightly-inset hit shape.
@@ -280,6 +284,10 @@ public sealed class Pet : IDisposable
     {
         _nowMs = nowMs;
         _dirty = true;
+        // A user grab interrupts a meme run. Otherwise the autonomous walk
+        // state can survive the drag and resume pushing the pet toward the edge.
+        if (_memePhase != MemePhase.None)
+            AbortMemeEvent();
         // Keep the pointer capture, but do not move the pet until the cursor
         // has crossed the drag threshold. A short click remains a click.
         IsBeingDragged = true;
@@ -477,6 +485,8 @@ public sealed class Pet : IDisposable
     /// <summary>Starts a seven-second dance/random sprite animation.</summary>
     public void StartDance(double nowMs)
     {
+        // Niko has no dance animation asset; leave all other skins unchanged.
+        if (Config.Skin.Equals("niko", StringComparison.OrdinalIgnoreCase)) return;
         _nowMs = nowMs;
         if (_sleeping) WakeUp(nowMs);
         StopTransientAnimations();
@@ -641,13 +651,34 @@ public sealed class Pet : IDisposable
 
     private double _lastGrabPhraseMs = -10000;
 
+    public void TogglePositionFreeze() { _positionFrozen = !_positionFrozen; }
+    public void ToggleSilent() { _silent = !_silent; if (_silent) _bubble.Hide(); }
+    public void ShowRandomMeme(double nowMs) => StartMemeEvent(nowMs);
+
     public void Say(double nowMs, string text)
     {
+        if (_silent) return;
+        if (Config.Skin.Equals("expie", StringComparison.OrdinalIgnoreCase))
+            text = Phrases.ExpieEquivalent(text, _bubble.Text);
         _bubble.Say(nowMs, text);
         _dirty = true;
     }
 
     public void HideBubble() => _bubble.Hide();
+
+    /// <summary>Stops autonomous cursor/meme actions on a direct user request.</summary>
+    public void StopCurrentAction(double nowMs)
+    {
+        _nowMs = nowMs;
+        bool wasBusy = _cursorPhase != CursorPhase.None || _memePhase != MemePhase.None;
+        EndCursorPlay();
+        AbortMemeEvent();
+        _running = false;
+        _vx = 0f; _vy = 0f; _spin = 0f; _spinVel = 0f; _airborne = false;
+        ClampToWorkArea();
+        Say(nowMs, wasBusy ? "Остановился. Больше не гонюсь и мем пока не тащу." : "Я и так стою. Никакой погони сейчас нет.");
+        _dirty = true;
+    }
 
     private void Hop(double nowMs, bool reaction)
     {
@@ -711,7 +742,7 @@ public sealed class Pet : IDisposable
     }
 
     private bool Busy => _animating || IsPetting || _petMainActive || _idleActive || _sleeping
-        || _airborne || IsBeingDragged || !_particles.IsEmpty;
+        || _airborne || IsBeingDragged || !_particles.IsEmpty || SpecialBehaviourActive;
 
     private bool AutomaticBehaviourAllowed =>
         _settings.Enabled && !Busy && !_settings.PauseOnFullscreen;
@@ -720,6 +751,7 @@ public sealed class Pet : IDisposable
     public bool Update(double nowMs, float dt, bool fullscreenActive)
     {
         _nowMs = nowMs;
+        if (_positionFrozen) { _dirty = true; return false; }
         float scaledDt = dt * _settings.SpeedScale;
         bool moved = false;
 
@@ -743,7 +775,8 @@ public sealed class Pet : IDisposable
                 _dirty = true;
             }
         }
-        if (_baseAnimating) _baseClockMs += dt * 1000f * _settings.SpeedScale;
+        if (_baseAnimating || ((_activity == PetActivity.Walking || _running) && !_sleeping))
+            _baseClockMs += dt * 1000f * _settings.SpeedScale;
         if (_petMainActive) _petMainClockMs += dt * 1000f * _settings.SpeedScale;
         if (_idleActive)
         {
@@ -795,7 +828,9 @@ public sealed class Pet : IDisposable
             TickIdleGif(nowMs);
             TickIdleMeow(nowMs);
             TickChatter(nowMs);
-            TickWander(nowMs, dt);
+            TickCursorPlay(nowMs);
+            TickMemeEvent(nowMs);
+            if (_memePhase == MemePhase.None) TickWander(nowMs, dt);
         }
 
         if (_sleeping) _dirty = _dirty || false;
@@ -811,7 +846,19 @@ public sealed class Pet : IDisposable
         if (dt <= 0f) return false;
         bool moved = false;
 
-        if (_airborne)
+        // These behaviours own horizontal movement while grounded. During a
+        // pounce, normal ballistic physics still takes priority.
+        if (_memePhase == MemePhase.LeavingScreen || _memePhase == MemePhase.Returning)
+        {
+            // Meme-event movement owns the pet regardless of stale airborne state.
+            _airborne = false; _vx = 0f; _vy = 0f; _spin = 0f; _spinVel = 0f;
+            moved = StepMemeWalk(dt);
+        }
+        else if (!_airborne && _cursorPhase == CursorPhase.Chasing)
+        {
+            moved = StepChase(dt);
+        }
+        else if (_airborne)
         {
             _vy += Gravity * _settings.GravityScale * dt;
             X += _vx * dt;
@@ -1066,7 +1113,7 @@ public sealed class Pet : IDisposable
 
     private void TickWander(double nowMs, float dt)
     {
-        if (!_settings.WanderEnabled) return;
+        if (!_settings.WanderEnabled || SpecialBehaviourActive) return;
 
         if (_activity == PetActivity.Walking)
         {
@@ -1205,8 +1252,10 @@ public sealed class Pet : IDisposable
         p.ScaleY = 1f + 0.022f * breath;
 
         // Walking bob — a small vertical bounce so movement reads as stepping.
-        if (_activity == PetActivity.Walking && !_sleeping)
+        if ((_activity == PetActivity.Walking || _running) && !_sleeping)
         {
+            // Keep the older stepping bounce and squash/stretch while walking
+            // or during scripted runs (including fetching a meme).
             float bob = MathF.Abs(MathF.Sin(_walkPhase * MathF.PI));
             p.Jump = bob * WalkBobAmplitude;
             p.ScaleY += 0.03f * bob;
@@ -1214,6 +1263,12 @@ public sealed class Pet : IDisposable
         }
 
         p.Angle = 0.025f * MathF.Sin(t * 1.15f) + _tilt;
+        if ((_activity == PetActivity.Walking || _running) && !_sleeping)
+        {
+            // Gentle body sway synced to the footsteps, like the legacy animation.
+            p.Angle += 0.055f * MathF.Sin(_walkPhase * MathF.PI * 0.5f);
+        }
+        if (_running) p.Angle += 0.07f * _runDir; // lean into the run
 
         // A small procedural dance layered over the available sprite animation.
         // This keeps dancing visible even though the source asset pack has no dedicated dance GIF.
@@ -1317,7 +1372,7 @@ public sealed class Pet : IDisposable
         if (_idleActive && _idleGif is not null) return _idleGif;
         if (_sleeping && _sleep is not null) return _sleep;
         if (_base is null) return null;
-        loop = _baseAnimating;
+        loop = _baseAnimating || ((_activity == PetActivity.Walking || _running) && !_sleeping);
         return _base;
     }
 
@@ -1328,7 +1383,7 @@ public sealed class Pet : IDisposable
     private AnimatedGif? Flipped(AnimatedGif? gif)
     {
         if (gif is null) return null;
-        if (_facing >= 0) return gif;
+        if (_facing <= 0) return gif;
         if (_flipped.TryGetValue(gif, out AnimatedGif? flip)) return flip;
 
         var frames = new GifFrame[gif.Frames.Length];
@@ -1365,7 +1420,8 @@ public sealed class Pet : IDisposable
         int frameIndex = gif.IsAnimated && loop ? gif.FrameAt(clock) : 0;
         // While grounded and calm the base sprite holds frame 0, matching the
         // plugin's paused GIF.
-        if (ReferenceEquals(source, _base) && !_baseAnimating) frameIndex = 0;
+        if (ReferenceEquals(source, _base) && !_baseAnimating
+            && !((_activity == PetActivity.Walking || _running) && !_sleeping)) frameIndex = 0;
 
         Bitmap frame = gif.Frames[frameIndex].Bitmap;
 

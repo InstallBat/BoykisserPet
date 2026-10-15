@@ -30,9 +30,16 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Decodes the .webp pictures for the "bring a picture" event; GDI+ cannot read WebP. -->
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- The archive keeps a nested source snapshot for compatibility; compile only the root source files. -->
     <Compile Remove="BoykisserPet\**\*.cs" />
     <EmbeddedResource Include="Assets\**\*" />
+    <EmbeddedResource Include="FreakyPhrases.txt" />
+    <None Update="FreakyPhrases.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

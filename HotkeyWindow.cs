@@ -30,7 +30,7 @@ public sealed class HotkeyWindow : NativeWindow, IDisposable
     private readonly List<int> _registered = new();
     private bool _disposed;
 
-    public HotkeyWindow(Action onPause, Action onTalk, Action onRoll, Action onAddPet, Action onSettings)
+    public HotkeyWindow(Action onPause, Action onTalk, Action onRoll, Action onAddPet, Action onSettings, bool enabled = true)
     {
         _onPause = onPause;
         _onTalk = onTalk;
@@ -47,6 +47,8 @@ public sealed class HotkeyWindow : NativeWindow, IDisposable
             Parent = new IntPtr(-3) // HWND_MESSAGE: message-only, never shown
         };
         CreateHandle(cp);
+
+        if (!enabled) return;
 
         uint mods = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
         TryRegister(1, mods, (uint)Keys.B, _onPause);

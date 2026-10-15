@@ -1,0 +1,3 @@
+# Expie assets
+# Required: boykisser.gif, pet.gif (can be copied from pet_main_v2.gif), mem1.webp ... mem5.webp
+# Optional sprites may be omitted; the app uses fallbacks.

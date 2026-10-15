@@ -68,12 +68,15 @@ public sealed class PetAudio : IDisposable
     private readonly string? _meowPath;
     private readonly string? _purrPath;
     private readonly string? _feedPath;
+    private readonly string? _rummagePath;
     private string _meowAlias = string.Empty;
     private string _purrAlias = string.Empty;
     private string _feedAlias = string.Empty;
     private bool _meowOpen;
     private bool _purrOpen;
     private bool _feedOpen;
+    private string _rummageAlias = string.Empty;
+    private bool _rummageOpen;
     private bool _purrPlaying;
     private int _meowDurationMs;
 
@@ -81,11 +84,12 @@ public sealed class PetAudio : IDisposable
     /// doesn't yowl over someone's game.</summary>
     public bool Muted { get; set; }
 
-    public PetAudio(string? meowPath, string? purrPath, string? feedPath = null)
+    public PetAudio(string? meowPath, string? purrPath, string? feedPath = null, string? rummagePath = null)
     {
         _meowPath = meowPath;
         _purrPath = purrPath;
         _feedPath = feedPath;
+        _rummagePath = rummagePath;
     }
 
     private void EnsureMeowOpen()
@@ -173,6 +177,24 @@ public sealed class PetAudio : IDisposable
         Mci.Send($"play {_feedAlias}");
     }
 
+    /// <summary>Plays the rummaging sound when the pet reaches the screen edge.</summary>
+    public int PlayRummage()
+    {
+        if (Muted || _rummagePath is null) return 900;
+        if (!_rummageOpen)
+        {
+            _rummageAlias = Mci.NextAlias("bkrummage");
+            _rummageOpen = Mci.Open(_rummagePath, _rummageAlias);
+        }
+        if (!_rummageOpen) return 900;
+        Mci.Send($"stop {_rummageAlias}");
+        Mci.Send($"seek {_rummageAlias} to start");
+        Mci.Send($"setaudio {_rummageAlias} volume to 1000");
+        int duration = Mci.LengthMs(_rummageAlias);
+        if (Mci.Send($"play {_rummageAlias}") != 0) return 900;
+        return Math.Clamp(duration, 500, 5000);
+    }
+
     /// <summary>Starts the purr loop. Idempotent while already purring, so a
     /// continuous petting stroke never restarts the sound.</summary>
     public void StartPurr()
@@ -199,8 +221,9 @@ public sealed class PetAudio : IDisposable
             if (_meowOpen) { Mci.Send($"stop {_meowAlias}"); Mci.Close(_meowAlias); }
             if (_purrOpen) { Mci.Send($"stop {_purrAlias}"); Mci.Close(_purrAlias); }
             if (_feedOpen) { Mci.Send($"stop {_feedAlias}"); Mci.Close(_feedAlias); }
+            if (_rummageOpen) { Mci.Send($"stop {_rummageAlias}"); Mci.Close(_rummageAlias); }
         }
         catch { /* shutting down; nothing useful to do */ }
-        _meowOpen = _purrOpen = _feedOpen = _purrPlaying = false;
+        _meowOpen = _purrOpen = _feedOpen = _rummageOpen = _purrPlaying = false;
     }
 }

@@ -91,6 +91,22 @@ internal static class Native
     public static extern bool GetCursorPos(out POINT lpPoint);
 
     [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    /// <summary>True while any of the left, right or middle mouse buttons is held down.</summary>
+    public static bool AnyMouseButtonDown()
+    {
+        const int VK_LBUTTON = 0x01, VK_RBUTTON = 0x02, VK_MBUTTON = 0x04;
+        return (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0
+            || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0
+            || (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr GetDC(IntPtr hWnd);
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -132,6 +148,12 @@ internal static class Native
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+
+    [DllImport("user32.dll")]
+    public static extern int GetWindowTextLength(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
@@ -182,6 +204,28 @@ internal static class Native
     public static Point CursorPosition()
     {
         return GetCursorPos(out POINT p) ? new Point(p.X, p.Y) : Point.Empty;
+    }
+
+
+    public static (string ProcessName, string WindowTitle) ForegroundApp()
+    {
+        IntPtr hwnd = GetForegroundWindow();
+        if (hwnd == IntPtr.Zero) return (string.Empty, string.Empty);
+        uint pid;
+        GetWindowThreadProcessId(hwnd, out pid);
+        string processName = string.Empty;
+        try { using var process = System.Diagnostics.Process.GetProcessById((int)pid); processName = process.ProcessName; }
+        catch { }
+        string title = string.Empty;
+        try
+        {
+            int length = Math.Clamp(GetWindowTextLength(hwnd), 0, 2048);
+            var buffer = new System.Text.StringBuilder(length + 1);
+            GetWindowText(hwnd, buffer, buffer.Capacity);
+            title = buffer.ToString();
+        }
+        catch { }
+        return (processName, title);
     }
 
     /// <summary>Milliseconds since the last keyboard/mouse input, system-wide.</summary>
